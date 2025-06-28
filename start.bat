@@ -1,0 +1,1 @@
+python decoder.py data.log output.txt
