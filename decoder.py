@@ -1,7 +1,8 @@
 import struct
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import Tuple
 from pathlib import Path
+import pandas as pd
 
 @dataclass
 class TelemetryPacket:
@@ -26,7 +27,6 @@ def parse_telemetry_packet(data: bytes) -> TelemetryPacket:
     if len(data) != 36:
         raise ValueError(f"Expected 36 bytes, got {len(data)}")
     
-    # Unpack all fields
     time_ms = int.from_bytes(data[0:3], 'little')
     
     temp_press = int.from_bytes(data[3:5], 'little')
@@ -60,22 +60,17 @@ def parse_telemetry_packet(data: bytes) -> TelemetryPacket:
     flags = lon_flags & 0xFF
     
     return TelemetryPacket(
-        time_ms=time_ms,
-        temp_cC=temp_cC,
-        pressPa=pressPa,
-        mag_x=mag_x, mag_y=mag_y, mag_z=mag_z,
-        accel_x=accel_x, accel_y=accel_y, accel_z=accel_z,
-        gyro_x=gyro_x, gyro_y=gyro_y, gyro_z=gyro_z,
-        altitude_cm=altitude_cm,
-        lat_1e7=lat_1e7,
-        lon_1e7=lon_1e7,
-        flags=flags
+        time_ms, temp_cC, pressPa,
+        mag_x, mag_y, mag_z,
+        accel_x, accel_y, accel_z,
+        gyro_x, gyro_y, gyro_z,
+        altitude_cm, lat_1e7, lon_1e7, flags
     )
 
 def clean_hex_string(raw_hex: str) -> str:
     return ''.join(c for c in raw_hex if c.lower() in '0123456789abcdef')
 
-def process_hex_file(input_file: str, output_file: str):
+def process_hex_file(input_file: str, output_csv: str):
     try:
         with open(input_file, 'r') as f:
             raw_data = f.read()
@@ -85,53 +80,187 @@ def process_hex_file(input_file: str, output_file: str):
         packet_count = total_len // 72
         
         if total_len % 72 != 0:
-            print(f"Warning: Truncated {total_len % 72} hex characters at the end")
+            print(f"Warning: Truncated {total_len % 72} hex characters")
             clean_hex = clean_hex[:packet_count * 72]
         
-        print(f"Processing {packet_count} packets from {input_file}...")
+        print(f"Processing {packet_count} packets...")
         
-        with open(output_file, 'w') as out_f:
-            # Write header
-            out_f.write("time_ms;temp_cC;pressPa;")
-            out_f.write("mag_x;mag_y;mag_z;")
-            out_f.write("accel_x;accel_y;accel_z;")
-            out_f.write("gyro_x;gyro_y;gyro_z;")
-            out_f.write("altitude_cm;lat_1e7;lon_1e7;flags\n")
-            
-            for i in range(packet_count):
-                start = i * 72
-                packet_hex = clean_hex[start:start+72]
-                
-                try:
-                    data = bytes.fromhex(packet_hex)
-                    packet = parse_telemetry_packet(data)
-                    
-                    # Write data line
-                    out_f.write(f"{packet.time_ms};{packet.temp_cC};{packet.pressPa};")
-                    out_f.write(f"{packet.mag_x};{packet.mag_y};{packet.mag_z};")
-                    out_f.write(f"{packet.accel_x};{packet.accel_y};{packet.accel_z};")
-                    out_f.write(f"{packet.gyro_x};{packet.gyro_y};{packet.gyro_z};")
-                    out_f.write(f"{packet.altitude_cm};{packet.lat_1e7};{packet.lon_1e7};{packet.flags}\n")
-                    
-                    if (i+1) % 100 == 0:
-                        print(f"Processed {i+1} packets...")
-                
-                except Exception as e:
-                    print(f"Error in packet {i+1}: {e}")
+        packets = []
+        for i in range(packet_count):
+            packet_hex = clean_hex[i*72:(i+1)*72]
+            try:
+                data = bytes.fromhex(packet_hex)
+                packets.append(parse_telemetry_packet(data))
+            except Exception as e:
+                print(f"Error in packet {i+1}: {e}")
         
-        print(f"Successfully processed {packet_count} packets. Results saved to {output_file}")
+        # Create DataFrame
+        df = pd.DataFrame([vars(p) for p in packets])
+        
+        # Convert time to seconds
+        df['time_s'] = df['time_ms'] / 1000
+        
+        # Save to CSV
+        df.to_csv(output_csv, index=False)
+        print(f"Data saved to {output_csv}")
+        
+        return df
     
     except Exception as e:
         print(f"Error: {e}")
+        return None
+
+def plot_telemetry_data(df, output_dir="plots"):
+    Path(output_dir).mkdir(exist_ok=True)
+    
+    # Prepare data
+    df['temp_C'] = df['temp_cC'] / 100
+    df['pressure'] = 60000 + df['pressPa']
+    df['altitude_m'] = df['altitude_cm'] / 100
+    df['gyro_x_dps'] = df['gyro_x'] / 10
+    df['gyro_y_dps'] = df['gyro_y'] / 10
+    df['gyro_z_dps'] = df['gyro_z'] / 10
+    
+    # Create plots
+    plt.figure(figsize=(12, 6))
+    
+    # Temperature plot
+    plt.subplot(2, 3, 1)
+    plt.plot(df['time_s'], df['temp_C'])
+    plt.title('Temperature (°C)')
+    plt.xlabel('Time (s)')
+    plt.grid(True)
+    
+    # Pressure plot
+    plt.subplot(2, 3, 2)
+    plt.plot(df['time_s'], df['pressure'])
+    plt.title('Pressure (Pa)')
+    plt.xlabel('Time (s)')
+    plt.grid(True)
+    
+    # Altitude plot
+    plt.subplot(2, 3, 3)
+    plt.plot(df['time_s'], df['altitude_m'])
+    plt.title('Altitude (m)')
+    plt.xlabel('Time (s)')
+    plt.grid(True)
+    
+    # Magnetometer plot
+    plt.subplot(2, 3, 4)
+    plt.plot(df['time_s'], df['mag_x'], label='X')
+    plt.plot(df['time_s'], df['mag_y'], label='Y')
+    plt.plot(df['time_s'], df['mag_z'], label='Z')
+    plt.title('Magnetometer (mG)')
+    plt.xlabel('Time (s)')
+    plt.legend()
+    plt.grid(True)
+    
+    # Accelerometer plot
+    plt.subplot(2, 3, 5)
+    plt.plot(df['time_s'], df['accel_x'], label='X')
+    plt.plot(df['time_s'], df['accel_y'], label='Y')
+    plt.plot(df['time_s'], df['accel_z'], label='Z')
+    plt.title('Accelerometer (mG)')
+    plt.xlabel('Time (s)')
+    plt.legend()
+    plt.grid(True)
+    
+    # Gyroscope plot
+    plt.subplot(2, 3, 6)
+    plt.plot(df['time_s'], df['gyro_x_dps'], label='X')
+    plt.plot(df['time_s'], df['gyro_y_dps'], label='Y')
+    plt.plot(df['time_s'], df['gyro_z_dps'], label='Z')
+    plt.title('Gyroscope (dps)')
+    plt.xlabel('Time (s)')
+    plt.legend()
+    plt.grid(True)
+    
+    plt.tight_layout()
+    plot_path = f"{output_dir}/telemetry_summary.png"
+    plt.savefig(plot_path)
+    print(f"Summary plot saved to {plot_path}")
+    plt.close()
+    
+    # Additional individual plots
+    plot_individual_graphs(df, output_dir)
+
+def plot_individual_graphs(df, output_dir):
+    # Temperature
+    plt.figure()
+    plt.plot(df['time_s'], df['temp_cC']/100)
+    plt.title('Temperature vs Time')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Temperature (°C)')
+    plt.grid(True)
+    plt.savefig(f"{output_dir}/temperature.png")
+    plt.close()
+    
+    # Pressure
+    plt.figure()
+    plt.plot(df['time_s'], 60000 + df['pressPa'])
+    plt.title('Pressure vs Time')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Pressure (Pa)')
+    plt.grid(True)
+    plt.savefig(f"{output_dir}/pressure.png")
+    plt.close()
+    
+    # Altitude
+    plt.figure()
+    plt.plot(df['time_s'], df['altitude_cm']/100)
+    plt.title('Altitude vs Time')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Altitude (m)')
+    plt.grid(True)
+    plt.savefig(f"{output_dir}/altitude.png")
+    plt.close()
+    
+    # Magnetometer
+    plt.figure(figsize=(10, 6))
+    for axis in ['x', 'y', 'z']:
+        plt.plot(df['time_s'], df[f'mag_{axis}'], label=f'Axis {axis.upper()}')
+    plt.title('Magnetometer Readings vs Time')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Magnetic Field (mG)')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{output_dir}/magnetometer.png")
+    plt.close()
+    
+    # Accelerometer
+    plt.figure(figsize=(10, 6))
+    for axis in ['x', 'y', 'z']:
+        plt.plot(df['time_s'], df[f'accel_{axis}'], label=f'Axis {axis.upper()}')
+    plt.title('Accelerometer Readings vs Time')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Acceleration (mG)')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{output_dir}/accelerometer.png")
+    plt.close()
+    
+    # Gyroscope
+    plt.figure(figsize=(10, 6))
+    for axis in ['x', 'y', 'z']:
+        plt.plot(df['time_s'], df[f'gyro_{axis}']/10, label=f'Axis {axis.upper()}')
+    plt.title('Gyroscope Readings vs Time')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Rotation Rate (dps)')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{output_dir}/gyroscope.png")
+    plt.close()
 
 if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 3:
-        print("Usage: python telemetry_parser.py <input_file> <output_file>")
+        print("Usage: python telemetry_parser.py <input_file> <output_csv>")
         sys.exit(1)
     
     input_file = sys.argv[1]
-    output_file = sys.argv[2]
+    output_csv = sys.argv[2]
     
-    process_hex_file(input_file, output_file)
+    df = process_hex_file(input_file, output_csv)
+    if df is not None:
+        plot_telemetry_data(df)
